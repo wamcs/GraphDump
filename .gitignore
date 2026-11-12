@@ -1,0 +1,16 @@
+# Python runtime
+__pycache__/
+*.pyc
+
+# dump artifacts
+graph_dump/
+dump_graph/
+
+# NPU / compile caches
+kernel_meta/
+.torchair_cache/
+torch_compile_debug/
+
+# env caches
+.tfenv_*/
+.venv/
