@@ -17,14 +17,12 @@ for path in (MODELS_ROOT, f"{R50}/script"):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-import torch  # noqa: E402
-import torch_npu  # noqa: E402
 import timm  # noqa: E402
+import torch  # noqa: E402
+from dump_tool import dump  # noqa: E402
 from PIL import Image  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402
 from torchvision import transforms  # noqa: E402
-
-from dump_tool import dump  # noqa: E402
 
 torch.npu.set_device(0)
 dev = "npu:0"
@@ -44,6 +42,4 @@ tfm = transforms.Compose([
 img = Image.open(os.path.join(R50, "script", "sample.jpg")).convert("RGB")
 x = tfm(img).unsqueeze(0).to(dev)
 
-dump(model, x, out_dir=f"{OUT}/model",
-     modes=("dynamo", "aot", "dispatch"), netron=True, verbose=True)
-dump(model, x, ge=True, out_dir=f"{OUT}/model_ge", verbose=True)
+dump(model, x, out_dir=OUT, graphs=("fx", "ge"), netron=True, verbose=True)

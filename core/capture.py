@@ -30,10 +30,8 @@ import torch
 import torch._dynamo as dynamo
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from .compat import (bump_dynamo_limits, patch_trace_compat,
-                     restore_dynamo_limits)
+from .compat import bump_dynamo_limits, patch_trace_compat, restore_dynamo_limits
 from .netron_view import export_netron_view
-
 
 # ---------- 元信息与落盘 ----------
 
@@ -88,7 +86,7 @@ def _save_fx_graph(gm, example_inputs, out_dir, prefix, note=""):
     # 是 trace 期 FakeTensor 元数据, 不执行任何计算; 老版本 torch 无 meta
     # 时降级为 "-"
     with open(base + ".shapes.txt", "w", encoding="utf-8") as f:
-        f.write(f"# 每个节点的输出 shape/dtype（placeholder 即输入形状）\n")
+        f.write("# 每个节点的输出 shape/dtype（placeholder 即输入形状）\n")
         f.write(f"# {note}\n\n")
         for node in gm.graph.nodes:
             if node.op == "output":

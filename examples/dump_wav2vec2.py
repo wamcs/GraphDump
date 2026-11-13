@@ -21,9 +21,7 @@ for path in (MODELS_ROOT, f"{W2V2}/script"):
         sys.path.insert(0, path)
 
 import torch  # noqa: E402
-import torch_npu  # noqa: E402
 from common import BENCHMARK_WAV, load_model  # noqa: E402
-
 from dump_tool import dump  # noqa: E402
 
 
@@ -48,6 +46,5 @@ model, extractor = load_model("npu:0")
 inputs = extractor(audio, sampling_rate=16000, return_tensors="pt")
 inputs = {k: v.to("npu:0") for k, v in inputs.items()}
 
-dump(model, **inputs, out_dir=f"{OUT}/model",
-     modes=("dynamo", "aot", "dispatch"), netron=True, verbose=True)
-dump(model, **inputs, ge=True, out_dir=f"{OUT}/model_ge", verbose=True)
+dump(model, **inputs, out_dir=OUT, graphs=("fx", "ge"),
+     netron=True, verbose=True)

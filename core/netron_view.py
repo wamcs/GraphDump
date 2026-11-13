@@ -206,6 +206,17 @@ def export_netron_view(gm, example_inputs, base, verbose=True,
             if got.endswith(".onnx") and not onnx_sanitize(got):
                 errors.append(f"{tag}: onnx checker 校验未通过, 已弃用")
                 continue
+            # FX→ONNX 补跑 shape inference: torch.onnx.export 产出的图
+            # value_info 常为空, 跑一次推理让 Netron 能显示中间 shape
+            if got.endswith(".onnx"):
+                try:
+                    import onnx
+                    model = onnx.load(got)
+                    model = onnx.shape_inference.infer_shapes(model,
+                        strict_mode=False, data_prop=False)
+                    onnx.save(model, got)
+                except Exception:  # noqa: BLE001  推断失败不阻塞
+                    pass
             if verbose and errors:
                 print(f"[dump_tool] netron 回退链: {' | '.join(errors)}")
             return got
@@ -301,30 +312,51 @@ def _ge_attr_value(v):
     return None
 
 
-def _ge_tensor_to_onnx(tensor_desc, ge_tensor):
-    """GE TensorProto → ONNX TensorProto（无数据时造同 shape 零值占位）。
+def _ge_tensor_to_onnx(ge_tensor):
+    """GE TensorProto → ONNX TensorProto。
 
-    Netron 只看结构, 占位数据可接受; dtype 取不到时默认 float。
+    从 ge_tensor 的 data 字段读二进制数据, 按 desc 的 dtype/shape 转成 numpy;
+    data 为空时造零值占位（Netron 只看结构）。
     """
     import numpy as np
-    import onnx
     from onnx import numpy_helper
 
-    dims = [d for d in tensor_desc.shape.dim] if tensor_desc.HasField("shape") else []
-    dtype_str = tensor_desc.dtype
-    np_dtype = {1: np.float32, 6: np.int32, 7: np.int64, 2: np.uint8,
-                9: np.bool_, 10: np.float16, 11: np.float64}.get(
-        _GE_DTYPE.get(str(dtype_str), 1), np.float32)
-    data = np.zeros(dims, dtype=np_dtype)
-    return numpy_helper.from_array(data)
+    desc = ge_tensor.desc
+    dims = [d for d in desc.shape.dim] if desc.HasField("shape") else []
+    dtype_str = str(desc.dtype)
+    np_dtype = {
+        "DT_FLOAT": np.float32, "DT_INT32": np.int32, "DT_INT64": np.int64,
+        "DT_UINT8": np.uint8, "DT_INT8": np.int8, "DT_BOOL": np.bool_,
+        "DT_FLOAT16": np.float16, "DT_DOUBLE": np.float64,
+    }.get(dtype_str, np.float32)
+
+    data = ge_tensor.data
+    if data:
+        arr = np.frombuffer(data, dtype=np_dtype)
+        if dims:
+            expected = int(np.prod(dims)) if dims else 1
+            if arr.size == expected:
+                arr = arr.reshape(dims)
+            elif arr.size > expected:
+                arr = arr[:expected].reshape(dims)
+            else:
+                arr = np.zeros(dims, dtype=np_dtype)
+        else:
+            arr = arr[:1] if arr.size >= 1 else np.zeros(1, dtype=np_dtype)
+    else:
+        arr = np.zeros(dims or [1], dtype=np_dtype)
+    return numpy_helper.from_array(arr)
 
 
 def export_ge_netron(graph_def, onnx_path, verbose=True):
-    """GE GraphDef proto → ONNX（Netron 可直接打开）。
+    """GE GraphDef proto → ONNX（Netron 可直接打开, 含 shape 和权重数据）。
 
-    Data → 图输入, NetOutput → 图输出, Const → initializer, 其余 op 按映射表
-    转标准 ONNX op; 无映射的 NPU 专属算子（FlashAttentionScore / BNInfer /
-    LayerNormV4 等）按原名透传——Netron 对未识别 op 类型仍渲染节点连线。
+    Data → 图输入（output_desc 里有 shape/dtype）;
+    NetOutput → 图输出;
+    Const → initializer（t.data 里的二进制数据→numpy）;
+    其余 op 按映射表转标准 ONNX op; 无映射的 NPU 专属算子按原名透传。
+    导出后跑 onnx.shape_inference 推断中间算子的 shape——Netron 由此能
+    显示所有节点的输入输出形状。
     返回 True/False。
     """
     try:
@@ -337,16 +369,16 @@ def export_ge_netron(graph_def, onnx_path, verbose=True):
         for op in graph_def.op:
             t = op.type
             if t == "Data":
-                index = op.attr["index"].i if "index" in op.attr else len(graph_inputs)
                 name = op.name
-                # shape/dtype 从 attr 的 TensorDescriptor 里取（尽力而为）
+                # shape/dtype 从 output_desc（proto 顶级字段）里取
                 dims, dtype = None, TensorProto.FLOAT
-                if "output" in op.attr and op.attr["output"].HasField("t"):
-                    desc = op.attr["output"].t.desc
+                if len(op.output_desc) > 0:
+                    desc = op.output_desc[0]
                     dims = [d for d in desc.shape.dim]
-                    dtype = _GE_DTYPE.get(str(desc.dtype), TensorProto.FLOAT)
+                    dtype = _GE_DTYPE.get(str(desc.dtype),
+                                          TensorProto.FLOAT)
                 vi = helper.make_tensor_value_info(
-                    f"{name}:0", dtype, dims or [None])
+                    f"{name}:0", dtype, dims if dims else [None])
                 vi.name = f"{name}:0"
                 graph_inputs.append(vi)
                 continue
@@ -356,15 +388,15 @@ def export_ge_netron(graph_def, onnx_path, verbose=True):
             if t == "Const":
                 if "value" in op.attr and op.attr["value"].HasField("t"):
                     try:
-                        tensor = _ge_tensor_to_onnx(
-                            op.attr["value"].t.desc, op.attr["value"].t)
+                        tensor = _ge_tensor_to_onnx(op.attr["value"].t)
                         tensor.name = f"{op.name}:0"
                         inits.append(tensor)
                         continue
                     except Exception:  # noqa: BLE001  数据取不到 → 当输入占位
                         pass
                 vi = helper.make_tensor_value_info(f"{op.name}:0",
-                                                   TensorProto.UNDEFINED, None)
+                                                   TensorProto.UNDEFINED,
+                                                   [None])
                 graph_inputs.append(vi)
                 continue
 
@@ -402,6 +434,13 @@ def export_ge_netron(graph_def, onnx_path, verbose=True):
         model = helper.make_model(graph, opset_imports=[
             helper.make_opsetid("", 17)])
         model.ir_version = 8
+
+        # shape 推断: 让中间算子的 shape 也能在 Netron 里显示
+        try:
+            model = onnx.shape_inference.infer_shapes(model)
+        except Exception:  # noqa: BLE001  推断失败不阻塞（部分算子无规则）
+            pass
+
         onnx.save(model, onnx_path)
         return True
     except Exception as e:  # noqa: BLE001

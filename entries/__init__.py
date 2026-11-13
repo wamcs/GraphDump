@@ -31,14 +31,18 @@ entry 文件契约（对任意本地可运行模型; 全部自行管理 import �
 """
 
 import contextlib
-import importlib.util
 import os
 
 import torch
 
-from ..core import (capture_aot_graphs, capture_dynamo_graphs,
-                    explain_breaks, export_ge_graph, tensor_diff,
-                    trace_dispatch)
+from ..core import (
+    capture_aot_graphs,
+    capture_dynamo_graphs,
+    explain_breaks,
+    export_ge_graph,
+    tensor_diff,
+    trace_dispatch,
+)
 
 
 class DumpTarget:
@@ -189,9 +193,10 @@ def _safe_verify(out, ref):
         return None
 
 
-def run_ge(targets, out_dir="graph_dump/ge", dynamic=False, verbose=True):
+def run_ge(targets, out_dir="graph_dump", dynamic=False, verbose=True):
     """对目标列表逐个做 GE 图导出（不做 GE 编译）。
 
+    目录结构: out_dir/<target>/ge/（与 dynamo/dispatch 同级, 统一管理）。
     GE 通道要求 nn.Module（dynamo_export 接口 + 权重名映射）; entry 返回
     非 Module 的 callable 时跳过并说明。
     """
@@ -208,12 +213,16 @@ def run_ge(targets, out_dir="graph_dump/ge", dynamic=False, verbose=True):
             continue
         with _wrap_contexts(target.contexts):
             args, kwargs = _normalize_inputs(target.make_inputs())
+            # GE 放在 target 子目录的 ge/ 下——与 dynamo/dispatch 同级
+            ge_dir = (os.path.join(out_dir, target.name, "ge")
+                      if target.name else os.path.join(out_dir, "ge"))
             report[target.name] = _safe(
                 f"[{target.name}/ge]",
                 lambda: export_ge_graph(
                     module, args, kwargs,
-                    out_dir=os.path.join(out_dir, target.name),
-                    export_name=target.name, dynamic=dynamic,
+                    out_dir=ge_dir,
+                    export_name=target.name if target.name else "ge_graph",
+                    dynamic=dynamic,
                     custom_decompositions=target.ge_decompositions,
                     verbose=verbose), verbose)
     return report

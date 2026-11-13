@@ -90,8 +90,9 @@ def _patch_pin_memory_fake_impl():
 
 def _patch_realize_all_cycles():
     try:
-        from torch._dynamo.variables import lazy as _lazy_mod
         import collections as _collections
+
+        from torch._dynamo.variables import lazy as _lazy_mod
 
         cls = _lazy_mod.LazyVariableTracker
         if getattr(cls.realize_all.__func__, _PATCHED_FLAG, False):
@@ -140,6 +141,26 @@ def patch_trace_compat():
     _patch_npu_triton_capability_check()
     _patch_pin_memory_fake_impl()
     _patch_realize_all_cycles()
+    _patch_transformers_capture_outputs()
+
+
+def _patch_transformers_capture_outputs():
+    """transformers 5.x 的 capture_outputs 装饰器兼容（幂等）。
+
+    该装饰器包裹所有 HF 模型的 forward, 内部用 ContextVar + 动态 scope
+    引用 torch——dynamo trace 时报 NameError: name 'torch' is not defined
+    （torch 只在 TYPE_CHECKING 块里导入, 不在运行时 globals 里）。
+
+    修复: 给 output_capturing 模块注入 torch 引用, 让 dynamo 能解析。
+    capture_outputs 只影响 output_hidden_states/attentions 等可选捕获,
+    不影响计算逻辑——对图 dump 无语义影响。
+    """
+    try:
+        import transformers.utils.output_capturing as _oc
+        if not hasattr(_oc, "torch"):
+            _oc.torch = torch  # 注入缺失的 torch 引用
+    except Exception:  # noqa: BLE001  非 transformers 5.x 时跳过
+        pass
 
 
 def bump_dynamo_limits():

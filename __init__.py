@@ -52,10 +52,18 @@ import os
 
 import torch
 
-from .core import (DEFAULT_ATTEMPT_TIMEOUT, capture_aot_graphs,
-                   capture_dynamo_graphs, dump_graphs, explain_breaks,
-                   export_ge_graph, export_netron_view, patch_trace_compat,
-                   tensor_diff, trace_dispatch)
+from .core import (
+    DEFAULT_ATTEMPT_TIMEOUT,
+    capture_aot_graphs,
+    capture_dynamo_graphs,
+    dump_graphs,
+    explain_breaks,
+    export_ge_graph,
+    export_netron_view,
+    patch_trace_compat,
+    tensor_diff,
+    trace_dispatch,
+)
 
 __version__ = "3.0.0"
 
@@ -100,9 +108,13 @@ def dump(model, *args, inputs=None, ctx=None, graphs=("fx", "ge"),
         else:
             with _stack_contexts(contexts):
                 call_args, call_kwargs = _normalize_inputs(_make_inputs())
-                ge_dir = out_dir if "fx" not in graphs else out_dir + "_ge"
+                # GE 统一放在 out_dir/ge/ 下——与 dynamo/dispatch 同级,
+                # 不再创建 _ge 后缀的独立目录
+                ge_dir = os.path.join(out_dir, "ge")
                 # 两级 GE 策略: 整图优先（fullgraph + .air）; 失败自动降级
-                # 逐子图捕获（断裂容忍 + 算子级容错）。
+                # 逐子图捕获（断裂容忍 + 算子级容错）。两级都可能因栈级
+                # 限制失败（如 fake 执行层不支持某 op）——GE 全灭时 FX 侧
+                # 继续执行, 不传染。
                 try:
                     from .core import export_ge_graph
                     export_ge_graph(
@@ -115,11 +127,17 @@ def dump(model, *args, inputs=None, ctx=None, graphs=("fx", "ge"),
                         print(f"[dump_tool] GE 整图导出失败（{type(e).__name__}: "
                               f"{str(e)[:160]}）→ 降级为逐子图 GE 捕获",
                               flush=True)
-                    from .core import capture_ge_graphs
-                    capture_ge_graphs(
-                        model, call_args, call_kwargs, out_dir=ge_dir,
-                        custom_decompositions=ge_decompositions, netron=netron,
-                        verbose=verbose)
+                    try:
+                        from .core import capture_ge_graphs
+                        capture_ge_graphs(
+                            model, call_args, call_kwargs, out_dir=ge_dir,
+                            custom_decompositions=ge_decompositions,
+                            netron=netron, verbose=verbose)
+                    except Exception as e2:  # noqa: BLE001  子图也全灭
+                        if verbose:
+                            print(f"[dump_tool] GE 逐子图也失败（栈级限制: "
+                                  f"{type(e2).__name__}: {str(e2)[:160]}）"
+                                  "→ GE 不可达, FX/dispatch 侧继续", flush=True)
 
     if "fx" in graphs:
         from .entries import DumpTarget, run_dump

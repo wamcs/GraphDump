@@ -51,15 +51,14 @@ def capture_ge_graphs(fn, args=(), kwargs=None,
     """
     import time
 
+    import torch._dynamo as dynamo
     import torch_npu  # noqa: F401
     import torch_npu.dynamo  # noqa: F401  懒注册 torchair
-    import torch._dynamo as dynamo
     from torch._dynamo.backends.common import aot_autograd
     from torchair import CompilerConfig
     from torchair.npu_fx_compiler import get_compiler
 
-    from .compat import (bump_dynamo_limits, patch_trace_compat,
-                         restore_dynamo_limits)
+    from .compat import bump_dynamo_limits, patch_trace_compat, restore_dynamo_limits
 
     def _merge_decompositions(config, custom):
         """版本自适应的分解表合并（与真实 torchair 编译同口径）。"""
@@ -68,8 +67,7 @@ def capture_ge_graphs(fn, args=(), kwargs=None,
             return _get_merged_decompositions(config, custom)  # 2.10: 含 patch
         except ImportError:
             # torch_npu 2.6 等旧版: 手动合并（default + custom + npu patch）
-            from torchair._utils import (add_npu_patch,
-                                         get_npu_default_decompositions)
+            from torchair._utils import add_npu_patch, get_npu_default_decompositions
             decomps = get_npu_default_decompositions()
             decomps.update(custom or {})
             add_npu_patch(decomps, config)
@@ -134,8 +132,8 @@ def capture_ge_graphs(fn, args=(), kwargs=None,
 
 def _load_ge_proto(txt_path):
     """从 dump 的文本 proto 反序列化为 GraphDef 对象。"""
-    from torchair._ge_concrete_graph import ge_ir_pb2
     from google.protobuf import text_format
+    from torchair._ge_concrete_graph import ge_ir_pb2
 
     gd = ge_ir_pb2.GraphDef()
     with open(txt_path, "r", encoding="utf-8") as f:
@@ -233,6 +231,7 @@ def export_ge_graph(model, args=(), kwargs=None, out_dir="graph_dump/ge",
     # GE 图 → Netron 格式（ge_dump 下的 txt proto 解析回 GraphDef 再转 ONNX）
     if netron:
         import glob as _glob
+
         from .netron_view import export_ge_netron
         for txt in sorted(_glob.glob(
                 os.path.join(result["ge_dump"], "*.txt"))):
@@ -248,76 +247,3 @@ def export_ge_graph(model, args=(), kwargs=None, out_dir="graph_dump/ge",
                     print(f"[dump_tool] ge netron 转换失败（{os.path.basename(txt)}"
                           f"）: {type(e).__name__}: {str(e)[:120]}", flush=True)
     return result
-
-
-def export_hf_causallm_ge(model_path, prompt="请介绍一下你自己。", *,
-                           out_dir="graph_dump/ge", device="auto",
-                           dtype=torch.bfloat16, attn_implementation="eager",
-                           entries=("prefill", "decode"), dynamic=False,
-                           verbose=True):
-    """HF CausalLM 的 prefill/decode GE 图导出（不做 GE 编译）。
-
-    返回 {entry: export_ge_graph 结果}; decode 若因 DynamicCache 在
-    torchair fullgraph 下不可 trace 而失败, 异常按入口隔离不影响其它入口。
-    """
-    from .hf_llm_entry import (_build_tokenized_inputs, _pick_device,
-                               _to_device_str)
-
-    dev_type = _pick_device(device)
-    dev = _to_device_str(dev_type)
-    if dev_type == "npu":
-        import torch_npu  # noqa: F401
-        torch.npu.set_device(0)
-        try:
-            torch_npu.npu.config.allow_internal_format = False
-        except Exception:  # noqa: BLE001
-            pass
-
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=dtype,
-        attn_implementation=attn_implementation).to(dev).eval()
-    inputs = _build_tokenized_inputs(tokenizer, prompt, dev)
-    input_ids, attention_mask = inputs["input_ids"], inputs["attention_mask"]
-    seq_len = input_ids.shape[1]
-    if verbose:
-        print(f"[dump_tool] ge export: {type(model).__name__} on {dev_type}, "
-              f"seq_len={seq_len}", flush=True)
-
-    results = {}
-
-    def _safe(entry, fn):
-        try:
-            results[entry] = fn()
-        except Exception as e:  # noqa: BLE001  入口级隔离
-            results[entry] = None
-            if verbose:
-                print(f"[dump_tool] ge export [{entry}] 失败: "
-                      f"{type(e).__name__}: {str(e)[:200]}", flush=True)
-
-    with torch.no_grad():
-        if "prefill" in entries:
-            _safe("prefill", lambda: export_ge_graph(
-                model, kwargs=dict(input_ids=input_ids,
-                                   attention_mask=attention_mask,
-                                   use_cache=True),
-                out_dir=os.path.join(out_dir, "prefill_forward"),
-                export_name="prefill_forward", dynamic=dynamic,
-                verbose=verbose))
-
-        if "decode" in entries:
-            pre = model(input_ids=input_ids, attention_mask=attention_mask,
-                        use_cache=True)
-            next_tok = pre.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            step_mask = torch.ones((1, seq_len + 1),
-                                   dtype=attention_mask.dtype, device=dev)
-            _safe("decode", lambda: export_ge_graph(
-                model, kwargs=dict(input_ids=next_tok,
-                                   attention_mask=step_mask,
-                                   past_key_values=pre.past_key_values,
-                                   use_cache=True),
-                out_dir=os.path.join(out_dir, "decode_step"),
-                export_name="decode_step", dynamic=dynamic, verbose=verbose))
-
-    return results

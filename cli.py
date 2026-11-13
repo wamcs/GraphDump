@@ -81,8 +81,12 @@ def main(argv=None):
             entries=tuple(e for e in cli.entries.split(",") if e))
 
     if cli.ge:
-        from .entries import run_ge
+        from .entries import run_dump, run_ge
+        # --ge 模式: 同时跑 GE 图导出 + FX/dispatch 补充信息
         run_ge(targets, out_dir=cli.out_dir, dynamic=cli.dynamic)
+        run_dump(targets, out_dir=cli.out_dir,
+                 modes=("dynamo", "dispatch"), netron=cli.netron,
+                 with_explain=cli.explain)
     else:
         from .entries import run_dump
         run_dump(targets, out_dir=cli.out_dir,
